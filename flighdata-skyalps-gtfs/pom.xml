@@ -46,7 +46,7 @@ SPDX-License-Identifier: CC0-1.0
 		<dependency>
 			<groupId>org.json</groupId>
 			<artifactId>json</artifactId>
-			<version>20220924</version>
+			<version>20231013</version>
 		</dependency>
 
 		<dependency>

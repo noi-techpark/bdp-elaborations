@@ -18,7 +18,7 @@ SPDX-License-Identifier: CC0-1.0
 	<properties>
 		<java.version>8</java.version>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-		<spring.version>5.3.20</spring.version>
+		<spring.version>6.1.13</spring.version>
 		<finalName>ROOT</finalName>
 	</properties>
 	<repositories>
@@ -32,7 +32,7 @@ SPDX-License-Identifier: CC0-1.0
 		<dependency>
 			<groupId>junit</groupId>
 			<artifactId>junit</artifactId>
-			<version>4.13.1</version>
+			<version>4.13.2</version>
 			<scope>test</scope>
 		</dependency>
 		<dependency>
