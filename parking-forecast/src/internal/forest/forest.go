@@ -8,9 +8,9 @@
 // compact forest is fit independently per station.
 //
 // Why a forest instead of a single tree or a linear model:
-//   - trees split on raw feature values, so weather/time/neighbor
-//     interactions ("weather only matters during peak hours") fall out
-//     automatically, without hand-crafted interaction terms
+//   - trees split on raw feature values, so weather/time interactions
+//     ("weather only matters during peak hours") fall out automatically,
+//     without hand-crafted interaction terms
 //   - evaluating each tree in the forest separately gives a natural
 //     prediction interval (the spread across trees), which is exactly what
 //     the old 5-model bootstrap ensemble was doing far more expensively —

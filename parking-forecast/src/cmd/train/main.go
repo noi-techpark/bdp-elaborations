@@ -3,12 +3,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Command train fits one Random Forest per active station from the cached
-// occupancy/holiday/weather/neighbor history and persists it to SQLite. It
-// replaces process2-signals-to-trainingdata.py + process3-fit-model.py and
-// the 5x dnn_model* TensorFlow ensemble: every station is fit independently
-// and in parallel, so training cost grows linearly with station count
-// instead of with (station count)^2 like the old one-hot-encoded joint
-// model. Scheduled nightly as its own k8s CronJob.
+// occupancy/holiday/weather history and persists it to SQLite. It replaces
+// process2-signals-to-trainingdata.py + process3-fit-model.py and the 5x
+// dnn_model* TensorFlow ensemble: every station is fit independently and in
+// parallel, so training cost grows linearly with station count instead of
+// with (station count)^2 like the old one-hot-encoded joint model.
+// Scheduled nightly as its own k8s CronJob.
+//
+// Unlike a one-step model that's rolled forward recursively at prediction
+// time (feeding each step's own prediction back in as if it were real, and
+// so compounding error into every step after it — measured directly in a
+// backtest against the previous approach), each station's forest is trained
+// directly on a spread of horizons (features.TrainingHorizonsMinutes): every
+// training row is "given what was known as of some anchor time, what was
+// the occupancy H minutes later," for many different H. cmd/predict then
+// evaluates the horizon it actually wants directly from a single fixed
+// anchor, with no recursion at all.
 package main
 
 import (
@@ -42,19 +52,11 @@ func main() {
 	ms.FailOnError(ctx, err, "loading stations")
 	slog.Info("training run starting", "stations", len(stations))
 
-	neighborsByStation, err := db.AllNeighbors()
-	ms.FailOnError(ctx, err, "loading neighbors")
-
 	holidayMap, err := db.AllHolidays()
 	ms.FailOnError(ctx, err, "loading holidays")
 
 	weatherMap, err := db.AllWeather()
 	ms.FailOnError(ctx, err, "loading weather")
-
-	stationsByCode := make(map[string]store.Station, len(stations))
-	for _, s := range stations {
-		stationsByCode[s.Scode] = s
-	}
 
 	forestCfg := forest.Config{
 		NumTrees:         cfg.ForestTrees,
@@ -86,7 +88,7 @@ func main() {
 			cfgCopy := forestCfg
 			cfgCopy.Seed = seed
 
-			rows, err := trainStation(db, s, neighborsByStation[s.Scode], stationsByCode, holidayMap, weatherMap, now, cfgCopy, cfg.MinTrainRows)
+			rows, err := trainStation(db, s, holidayMap, weatherMap, now, cfgCopy, cfg.MinTrainRows)
 			results <- outcome{scode: s.Scode, rows: rows, err: err}
 		}(s, now.Unix()+int64(i))
 	}
@@ -120,8 +122,6 @@ func main() {
 func trainStation(
 	db *store.DB,
 	s store.Station,
-	neighborCodes []string,
-	stationsByCode map[string]store.Station,
 	holidayMap map[string]store.DayInfo,
 	weatherMap map[string]int,
 	now time.Time,
@@ -135,6 +135,14 @@ func trainStation(
 	if !ok {
 		return 0, nil
 	}
+	// ODH's raw occupancy feed isn't reliably 5-minute-grid-aligned (sensor
+	// jitter of a few seconds to a few minutes is common, see e.g. FAMAS
+	// history) — the loop below and RollingMean7d below both stride from
+	// this anchor in fixed StepSeconds steps, so an unaligned anchor would
+	// carry that same offset through every lookup for the entire training
+	// window, silently missing grid-aligned samples (like cmd/predict's
+	// cutoff, which is already Truncate'd for this reason).
+	from = from.Truncate(features.StepSeconds * time.Second)
 	to := now
 
 	rawOcc, err := db.OccupancyMap(s.Scode, from, to)
@@ -143,22 +151,8 @@ func trainStation(
 	}
 	occ := features.Normalize(rawOcc, s.Capacity)
 
-	neighborOcc := make([]map[int64]float64, 0, len(neighborCodes))
-	for _, nc := range neighborCodes {
-		ns, ok := stationsByCode[nc]
-		if !ok {
-			continue
-		}
-		rawNeighbor, err := db.OccupancyMap(nc, from, to)
-		if err != nil {
-			continue
-		}
-		neighborOcc = append(neighborOcc, features.Normalize(rawNeighbor, ns.Capacity))
-	}
-
 	inputs := features.Inputs{
 		Occupancy: occ,
-		Neighbor:  features.NeighborMeans(neighborOcc, from, to),
 		Mean7d:    features.RollingMean7d(occ, from, to),
 		Holidays:  holidayMap,
 		Weather:   weatherMap,
@@ -166,17 +160,24 @@ func trainStation(
 
 	var X [][]float64
 	var y []float64
-	for cur := from.Unix(); cur <= to.Unix(); cur += features.StepSeconds {
-		target, hasTarget := occ[cur]
-		if !hasTarget {
-			continue
+	for anchorUnix := from.Unix(); anchorUnix <= to.Unix(); anchorUnix += features.StepSeconds {
+		anchor := time.Unix(anchorUnix, 0).UTC()
+		for _, h := range features.TrainingHorizonsMinutes {
+			targetUnix := anchorUnix + int64(h)*60
+			if targetUnix > to.Unix() {
+				continue // no label for a horizon that hasn't happened yet
+			}
+			label, hasLabel := occ[targetUnix]
+			if !hasLabel {
+				continue
+			}
+			row, ok := features.Build(time.Unix(targetUnix, 0).UTC(), anchor, inputs)
+			if !ok {
+				continue
+			}
+			X = append(X, row[:])
+			y = append(y, label)
 		}
-		row, ok := features.Build(time.Unix(cur, 0).UTC(), inputs)
-		if !ok {
-			continue
-		}
-		X = append(X, row[:])
-		y = append(y, target)
 	}
 
 	if len(X) < minRows {

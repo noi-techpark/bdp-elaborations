@@ -16,13 +16,6 @@ type Station struct {
 	Active      bool
 }
 
-type Neighbor struct {
-	Scode         string
-	NeighborScode string
-	Rank          int
-	DistanceM     float64
-}
-
 // UpsertStations replaces the known station set. Stations no longer present
 // upstream are marked inactive rather than deleted, so historical data/models
 // stay addressable.
@@ -79,71 +72,6 @@ func (db *DB) ActiveStations() ([]Station, error) {
 			return nil, err
 		}
 		out = append(out, s)
-	}
-	return out, rows.Err()
-}
-
-// ReplaceNeighbors overwrites the full neighbor table in one transaction.
-func (db *DB) ReplaceNeighbors(neighbors []Neighbor) error {
-	tx, err := db.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec(`DELETE FROM neighbors`); err != nil {
-		return err
-	}
-
-	stmt, err := tx.Prepare(`INSERT INTO neighbors (scode, rank, neighbor_scode, distance_m) VALUES (?, ?, ?, ?)`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, n := range neighbors {
-		if _, err := stmt.Exec(n.Scode, n.Rank, n.NeighborScode, n.DistanceM); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
-}
-
-// NeighborsOf returns the neighbor station codes of scode, nearest first.
-func (db *DB) NeighborsOf(scode string) ([]string, error) {
-	rows, err := db.sql.Query(`SELECT neighbor_scode FROM neighbors WHERE scode = ? ORDER BY rank`, scode)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []string
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			return nil, err
-		}
-		out = append(out, n)
-	}
-	return out, rows.Err()
-}
-
-// AllNeighbors returns the full neighbor map, station -> ordered neighbor codes.
-func (db *DB) AllNeighbors() (map[string][]string, error) {
-	rows, err := db.sql.Query(`SELECT scode, neighbor_scode FROM neighbors ORDER BY scode, rank`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := map[string][]string{}
-	for rows.Next() {
-		var scode, neighbor string
-		if err := rows.Scan(&scode, &neighbor); err != nil {
-			return nil, err
-		}
-		out[scode] = append(out[scode], neighbor)
 	}
 	return out, rows.Err()
 }

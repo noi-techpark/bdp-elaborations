@@ -22,9 +22,9 @@ Three independent jobs, written in Go, share a single SQLite cache:
 
 | Job               | Schedule (typical) | Does                                                                                          |
 |-------------------|---------------------|------------------------------------------------------------------------------------------------|
-| `cmd/ingest`      | every 15 min         | pulls new occupancy history from ODH, refreshes weather/holiday/neighbor caches                |
+| `cmd/ingest`      | every 15 min         | pulls new occupancy history from ODH, refreshes weather/holiday caches                          |
 | `cmd/train`       | nightly              | fits one Random Forest per station from the cached history                                     |
-| `cmd/predict`     | hourly                | rolls the forecast forward 48h and writes `result.json`                                        |
+| `cmd/predict`     | hourly                | forecasts 48h ahead directly per horizon and writes `result.json`                               |
 
 Each is a standalone binary; in production each runs as its own Kubernetes CronJob against the
 same container image (see `infrastructure/helm`), the pattern this repo's other elaborations
@@ -37,16 +37,26 @@ One **Random Forest regressor per station**, trained independently from that sta
 history — not one joint model over every station like before (see below). Features, all fixed
 in number regardless of station count or time resolution:
 
-- time of day / day of week / day of year (all cyclical, `sin`/`cos` — the day-of-year pair is
-  what lets the model learn annual seasonality, e.g. tourist/ski season vs. off-season)
-- `is_holiday`, `is_school`, weather symbol
-- own occupancy lags: 5 min, 10 min, 1 hour, 1 day, 1 week
-- own trailing 7-day mean
-- mean occupancy ratio across the station's k nearest neighbors (one step lagged, to avoid a
-  circular dependency during the multi-step forecast — see `internal/features`)
+- time of day / day of week / day of year of the timestamp being predicted (all cyclical,
+  `sin`/`cos` — the day-of-year pair is what lets the model learn annual seasonality, e.g.
+  tourist/ski season vs. off-season)
+- `is_holiday`, `is_school`, weather symbol, also for the timestamp being predicted
+- own occupancy lags, all relative to the most recent real observation (the "anchor"): the anchor
+  itself, 5 min before it, 1 hour before it, 1 day before it, 1 week before it
+- own trailing 7-day mean as of the anchor
+- the horizon itself (minutes from the anchor to the timestamp being predicted)
 
-`cmd/predict` steps through the 48h horizon one 5-minute tick at a time, evaluating every
-station together at each tick, so lag and neighbor features roll forward consistently (see
+A station's own history was found to be the dominant signal in practice — a nearest-neighbor
+occupancy feature was tried and measurably didn't improve accuracy (its information turned out to
+be redundant with the station's own lags), so it isn't part of the feature set.
+
+`cmd/predict` evaluates every requested horizon directly from the same anchor — no recursion.
+An earlier version stepped through the horizon one 5-minute tick at a time, feeding each step's
+own prediction back in as if it were a real observation for the next step's lags; a backtest
+against the live production model showed that compounding error past ~90 minutes out, ending up
+worse than the live model by 4 hours. Training the forest across a spread of horizons
+(`features.TrainingHorizonsMinutes`) instead, with the horizon itself as an input feature, avoids
+that: predicting 4 hours out never depends on a 30-minute guess having been right (see
 `internal/features`'s and `cmd/predict`'s package docs for the details).
 
 A forest's individual trees, evaluated separately, give the `lo`/`mean`/`hi` prediction interval
@@ -97,20 +107,19 @@ cat data/result/result.json
 ## Configuration
 
 All configuration is environment variables, processed by `internal/config`; see that file for the
-full list and defaults (Open Data Hub endpoints/credentials, station types, neighbor count, forest
-hyperparameters, forecast horizon, `result.json` path).
+full list and defaults (Open Data Hub endpoints/credentials, station types, forest hyperparameters,
+forecast horizon, `result.json` path).
 
 ## Repository layout
 
 | Path                             | Purpose                                                              |
 |-----------------------------------|------------------------------------------------------------------------|
-| `src/cmd/ingest`                 | occupancy/weather/holiday/neighbor cache refresh                     |
-| `src/cmd/train`                  | per-station Random Forest fitting                                    |
-| `src/cmd/predict`                | 48h recursive rollout + `result.json`                                 |
-| `src/internal/store`             | SQLite cache (occupancy, reference data, station/neighbor metadata, models) |
+| `src/cmd/ingest`                 | occupancy/weather/holiday cache refresh                              |
+| `src/cmd/train`                  | per-station Random Forest fitting, across a spread of horizons        |
+| `src/cmd/predict`                | direct per-horizon forecast (no recursion) + `result.json`            |
+| `src/internal/store`             | SQLite cache (occupancy, reference data, station metadata, models)   |
 | `src/internal/odh`               | Open Data Hub station/history client (wraps `go-timeseries-client`/`elab`'s read side) |
 | `src/internal/weather`, `.../holidays` | Tourism Open Data Hub reference data                             |
-| `src/internal/neighbors`         | geographic k-nearest-neighbor computation                            |
 | `src/internal/features`          | feature row construction, shared by train and predict                |
 | `src/internal/forest`            | dependency-free Random Forest regressor                              |
 | `src/internal/publish`           | legacy `result.json` renderer                                        |
@@ -130,12 +139,8 @@ runs against today:
 - **train** fits one forest per station in parallel (bounded by CPU count); wall-clock time grows
   with station count only as fast as core count allows, and per-worker memory is bounded by one
   station's history, not the whole dataset.
-- **predict**'s rollout is O(stations × forecast steps), each step a cheap forest evaluation —
+- **predict** is O(stations × forecast steps), each step a cheap, independent forest evaluation —
   still comfortably sub-second-to-low-seconds at 10-100x today's station count.
-- **neighbors.Compute** is the one intentionally-simple piece: an O(n²) pairwise distance scan. At
-  today's scale and even 10-100x it, this is milliseconds and runs only when the station list
-  changes; it would need a spatial index (grid/k-d tree) well before it became a real cost, and
-  isn't worth that complexity until it actually matters.
 - the SQLite cache itself is bounded regardless of station count or how many years this runs for
   — see [Data retention & training cost](#data-retention--training-cost).
 

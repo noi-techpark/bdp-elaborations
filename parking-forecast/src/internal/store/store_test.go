@@ -52,34 +52,6 @@ func TestStationsRoundTrip(t *testing.T) {
 	}
 }
 
-func TestNeighborsRoundTrip(t *testing.T) {
-	db := openTestDB(t)
-
-	err := db.ReplaceNeighbors([]Neighbor{
-		{Scode: "A", Rank: 0, NeighborScode: "B", DistanceM: 10},
-		{Scode: "A", Rank: 1, NeighborScode: "C", DistanceM: 20},
-	})
-	if err != nil {
-		t.Fatalf("ReplaceNeighbors: %v", err)
-	}
-
-	got, err := db.NeighborsOf("A")
-	if err != nil {
-		t.Fatalf("NeighborsOf: %v", err)
-	}
-	if len(got) != 2 || got[0] != "B" || got[1] != "C" {
-		t.Fatalf("got %v, want [B C] in rank order", got)
-	}
-
-	all, err := db.AllNeighbors()
-	if err != nil {
-		t.Fatalf("AllNeighbors: %v", err)
-	}
-	if len(all["A"]) != 2 {
-		t.Fatalf("AllNeighbors[A] = %v", all["A"])
-	}
-}
-
 func TestOccupancyIngestCursorAndLookup(t *testing.T) {
 	db := openTestDB(t)
 

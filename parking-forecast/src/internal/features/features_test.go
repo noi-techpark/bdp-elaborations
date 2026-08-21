@@ -12,34 +12,35 @@ import (
 	"parking-forecast/internal/store"
 )
 
-func TestSeasonalFeatureWrapsAroundNewYear(t *testing.T) {
-	full := func(ts time.Time) Inputs {
-		unix := ts.Unix()
-		return Inputs{
-			Occupancy: map[int64]float64{
-				unix - StepSeconds: 0.1, unix - lag10m: 0.1, unix - lag1h: 0.1,
-				unix - lag1d: 0.1, unix - lag1w: 0.1,
-			},
-			Neighbor: map[int64]float64{unix - StepSeconds: 0.2},
-			Mean7d:   map[int64]float64{unix: 0.3},
-			Holidays: map[string]store.DayInfo{ts.Format("2006-01-02"): {}},
-			Weather:  map[string]int{ts.Format("2006-01-02"): 1},
-		}
+func fullInputs(anchor time.Time) Inputs {
+	unix := anchor.Unix()
+	return Inputs{
+		Occupancy: map[int64]float64{
+			unix: 0.1, unix - StepSeconds: 0.1, unix - lag1h: 0.1,
+			unix - lag1d: 0.1, unix - lag1w: 0.1,
+		},
+		Mean7d:   map[int64]float64{unix: 0.3},
+		Holidays: map[string]store.DayInfo{anchor.Format("2006-01-02"): {}},
+		Weather:  map[string]int{anchor.Format("2006-01-02"): 1},
 	}
+}
 
+func TestSeasonalFeatureWrapsAroundNewYear(t *testing.T) {
 	dec31 := time.Date(2025, 12, 31, 12, 0, 0, 0, time.UTC)
 	jan1 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	jul1 := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	xDec31, ok := Build(dec31, full(dec31))
+	// anchor == target reproduces the old one-step behavior; only the
+	// calendar features (which describe target) are under test here.
+	xDec31, ok := Build(dec31, dec31, fullInputs(dec31))
 	if !ok {
 		t.Fatalf("expected ok=true for dec31")
 	}
-	xJan1, ok := Build(jan1, full(jan1))
+	xJan1, ok := Build(jan1, jan1, fullInputs(jan1))
 	if !ok {
 		t.Fatalf("expected ok=true for jan1")
 	}
-	xJul1, ok := Build(jul1, full(jul1))
+	xJul1, ok := Build(jul1, jul1, fullInputs(jul1))
 	if !ok {
 		t.Fatalf("expected ok=true for jul1")
 	}
@@ -84,52 +85,54 @@ func TestRollingMean7dMissingWhenNoHistory(t *testing.T) {
 }
 
 func TestBuildRequiresAllMandatoryInputs(t *testing.T) {
-	ts := time.Date(2026, 1, 8, 8, 5, 0, 0, time.UTC)
-	unix := ts.Unix()
+	anchor := time.Date(2026, 1, 8, 8, 5, 0, 0, time.UTC)
+	full := fullInputs(anchor)
 
-	full := Inputs{
-		Occupancy: map[int64]float64{
-			unix - StepSeconds: 0.1,
-			unix - lag10m:      0.1,
-			unix - lag1h:       0.1,
-			unix - lag1d:       0.1,
-			unix - lag1w:       0.1,
-		},
-		Neighbor: map[int64]float64{unix - StepSeconds: 0.2},
-		Mean7d:   map[int64]float64{unix: 0.3},
-		Holidays: map[string]store.DayInfo{"2026-01-08": {IsSchool: true}},
-		Weather:  map[string]int{"2026-01-08": 5},
-	}
-
-	if _, ok := Build(ts, full); !ok {
+	if _, ok := Build(anchor, anchor, full); !ok {
 		t.Fatalf("expected ok=true when all mandatory inputs are present")
 	}
 
 	missingLag := full
-	missingLag.Occupancy = map[int64]float64{unix - StepSeconds: 0.1} // missing the rest
-	if _, ok := Build(ts, missingLag); ok {
+	missingLag.Occupancy = map[int64]float64{anchor.Unix(): 0.1} // missing the rest
+	if _, ok := Build(anchor, anchor, missingLag); ok {
 		t.Fatalf("expected ok=false when a lag is missing")
-	}
-
-	missingNeighbor := full
-	missingNeighbor.Neighbor = map[int64]float64{}
-	if _, ok := Build(ts, missingNeighbor); ok {
-		t.Fatalf("expected ok=false when the neighbor average is missing")
 	}
 
 	missingWeather := full
 	missingWeather.Weather = map[string]int{}
-	if _, ok := Build(ts, missingWeather); ok {
+	if _, ok := Build(anchor, anchor, missingWeather); ok {
 		t.Fatalf("expected ok=false when weather is missing")
 	}
 }
 
-func TestNeighborMeansAveragesAvailableNeighbors(t *testing.T) {
-	base := time.Date(2026, 1, 8, 12, 0, 0, 0, time.UTC)
-	n1 := map[int64]float64{base.Unix(): 0.2}
-	n2 := map[int64]float64{base.Unix(): 0.6}
-	out := NeighborMeans([]map[int64]float64{n1, n2}, base, base)
-	if math.Abs(out[base.Unix()]-0.4) > 1e-9 {
-		t.Fatalf("got %v, want 0.4", out[base.Unix()])
+func TestBuildDirectHorizonUsesAnchorLagsAndTargetCalendar(t *testing.T) {
+	anchor := time.Date(2026, 1, 8, 8, 5, 0, 0, time.UTC) // a Thursday
+	full := fullInputs(anchor)
+	// target's own occupancy/weather/holidays are deliberately absent from
+	// full — a direct-horizon prediction must not need them.
+	target := anchor.Add(2 * time.Hour)
+
+	row, ok := Build(target, anchor, full)
+	if !ok {
+		t.Fatalf("expected ok=true predicting 2h ahead from a fixed anchor without any data at target")
+	}
+	if row[IdxHorizonMinutes] != 120 {
+		t.Fatalf("expected IdxHorizonMinutes=120, got %v", row[IdxHorizonMinutes])
+	}
+	if row[IdxLagNow] != 0.1 || row[IdxLagPrev5m] != 0.1 {
+		t.Fatalf("expected lag features to come from the anchor, got LagNow=%v LagPrev5m=%v", row[IdxLagNow], row[IdxLagPrev5m])
+	}
+
+	// Calendar features must describe target, not anchor: pick a target on
+	// a different day to make sure day-of-week actually moved.
+	nextDay := anchor.Add(24 * time.Hour)
+	full.Holidays[nextDay.Format("2006-01-02")] = store.DayInfo{}
+	full.Weather[nextDay.Format("2006-01-02")] = 1
+	rowNextDay, ok := Build(nextDay, anchor, full)
+	if !ok {
+		t.Fatalf("expected ok=true predicting into the next day")
+	}
+	if rowNextDay[IdxSinDow] == row[IdxSinDow] && rowNextDay[IdxCosDow] == row[IdxCosDow] {
+		t.Fatalf("expected day-of-week features to reflect target's date, not anchor's")
 	}
 }

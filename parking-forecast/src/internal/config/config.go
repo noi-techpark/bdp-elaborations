@@ -22,7 +22,7 @@ type Env struct {
 	// Tourism Open Data Hub API — weather + school/public holiday events
 	TourismApiBaseUrl string `envconfig:"TOURISM_API_BASE_URL" default:"https://tourism.api.opendatahub.com/v1"`
 
-	// Local SQLite cache: occupancy/weather/holiday history, station/neighbor
+	// Local SQLite cache: occupancy/weather/holiday history, station
 	// metadata and fitted per-station forests. Mounted on a PVC in production.
 	DbPath string `envconfig:"DB_PATH" default:"data/parking.db"`
 
@@ -34,9 +34,6 @@ type Env struct {
 	// what keeps the cache — and nightly training cost — bounded forever,
 	// instead of growing with every station-year ingested.
 	OccupancyRetentionDays int `envconfig:"OCCUPANCY_RETENTION_DAYS" default:"400"`
-
-	// Feature engineering
-	NeighborK int `envconfig:"NEIGHBOR_K" default:"4"`
 
 	// Model
 	ForestTrees            int     `envconfig:"FOREST_TREES" default:"60"`

@@ -7,7 +7,7 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
-# SQLite cache — occupancy/holiday/weather history, station/neighbor metadata
+# SQLite cache — occupancy/holiday/weather history, station metadata
 # and fitted per-station forests. Shared by all three jobs (ingest writes
 # occupancy/reference data, train writes models, predict reads all of it).
 # Delete the file to force a full rebuild from scratch:
@@ -63,7 +63,6 @@ env:
   # growing with every station-year ingested — see internal/config.
   OCCUPANCY_RETENTION_DAYS: "400"
 
-  NEIGHBOR_K: "4"
   FOREST_TREES: "60"
   FOREST_MAX_DEPTH: "8"
   FOREST_MIN_LEAF_SAMPLES: "20"

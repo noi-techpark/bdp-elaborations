@@ -5,7 +5,7 @@
 // Package store persists everything the parking forecast jobs need between
 // runs in a single SQLite file (same convention as pollution_v2's
 // checkpoint_cache.db): the incrementally-ingested occupancy history,
-// holiday/weather reference data, station/neighbor metadata and the fitted
+// holiday/weather reference data, station metadata and the fitted
 // per-station forests. This replaces the old data-raw/*.csv,
 // data-holidays/holidays.csv, data-meteo/meteo.csv and data-models/dnn_model*
 // files.
@@ -33,14 +33,6 @@ CREATE TABLE IF NOT EXISTS stations (
 	lon          REAL NOT NULL,
 	capacity     REAL,
 	active       INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE TABLE IF NOT EXISTS neighbors (
-	scode          TEXT NOT NULL,
-	rank           INTEGER NOT NULL,
-	neighbor_scode TEXT NOT NULL,
-	distance_m     REAL NOT NULL,
-	PRIMARY KEY (scode, rank)
 );
 
 CREATE TABLE IF NOT EXISTS occupancy (

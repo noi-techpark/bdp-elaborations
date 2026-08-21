@@ -2,18 +2,25 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Command predict performs the recursive 48h rollout across every station
-// with a trained forest, then writes the legacy result.json (publishing to
-// ODH/BDP is planned but not implemented yet). It replaces
+// Command predict evaluates every station's forest directly, once per
+// forecast step, anchored on the same cutoff (the most recent real
+// observation) each time — then writes the legacy result.json (publishing
+// to ODH/BDP is planned but not implemented yet). It replaces
 // process4-prediction.py + process5-generate-json.py. Scheduled hourly as
 // its own k8s CronJob.
 //
-// Unlike the old pipeline (one big matrix built once, in one CUTOFF_IX/park
-// nested loop over a single joint model), this steps through the timeline
-// one 5-minute tick at a time and, at each tick, evaluates every station's
-// own forest — so a station's own lags and its neighbors' one-step-lagged
-// occupancy naturally roll forward together without any circular
-// dependency (see internal/features's package doc).
+// This is deliberately not a recursive rollout: an earlier version stepped
+// through the horizon one 5-minute tick at a time, feeding each step's own
+// prediction back in as if it were a real observation for the next step's
+// lag features. That compounds error — a backtest against the live
+// production model showed it losing ground steadily past ~90 minutes out,
+// worse than the live model by 4 hours, precisely because early mistakes
+// dragged every later step down with them. Evaluating every horizon
+// directly from the same real anchor (see features.Build and
+// features.TrainingHorizonsMinutes, which cmd/train fits the forest across)
+// avoids that entirely: a mistake at 30 minutes has no way to influence the
+// prediction at 4 hours, because both are computed independently from the
+// same unmodified history.
 package main
 
 import (
@@ -39,9 +46,7 @@ import (
 const predictSafetyMargin = 10 * time.Minute
 
 // historyBuffer bounds how much history gets loaded per station: nothing
-// beyond it is ever read once the rollout is running (same optimization
-// process4-prediction.py made, for the same reason — lookups never reach
-// further back than one week).
+// beyond it is ever read (the longest lookback any feature needs is lag1w).
 const historyBuffer = 8 * 24 * time.Hour
 
 func main() {
@@ -59,8 +64,6 @@ func main() {
 	ms.FailOnError(ctx, err, "loading stations")
 	slog.Info("prediction run starting", "stations", len(stations))
 
-	neighborsByStation, err := db.AllNeighbors()
-	ms.FailOnError(ctx, err, "loading neighbors")
 	holidayMap, err := db.AllHolidays()
 	ms.FailOnError(ctx, err, "loading holidays")
 	weatherMap, err := db.AllWeather()
@@ -69,12 +72,18 @@ func main() {
 	cutoff := time.Now().UTC().Add(-predictSafetyMargin).Truncate(features.StepSeconds * time.Second)
 	horizonSteps := cfg.HoursToPredict * 60 / (features.StepSeconds / 60)
 	from := cutoff.Add(-historyBuffer)
-	to := cutoff.Add(time.Duration(horizonSteps) * features.StepSeconds * time.Second)
 
-	slog.Info("forecast window", "cutoff", cutoff, "horizonSteps", horizonSteps, "to", to)
+	slog.Info("forecast window", "cutoff", cutoff, "horizonSteps", horizonSteps)
 
-	rollout := newRollout(db, stations, neighborsByStation, holidayMap, weatherMap, from, cutoff, to, cfg)
-	forecasts := rollout.run(horizonSteps, cfg)
+	models, err := loadModels(db, stations)
+	if err != nil {
+		slog.Error("loading models", "err", err)
+	}
+
+	forecasts := make([]publish.StationForecast, 0, len(stations))
+	for _, s := range stations {
+		forecasts = append(forecasts, predictStation(db, s, models[s.Scode], holidayMap, weatherMap, from, cutoff, horizonSteps, cfg))
+	}
 
 	if err := publish.WriteResultJSON(cfg.ResultJsonPath, cutoff.Add(features.StepSeconds*time.Second), cfg.HoursToPredict, cfg.ModelVersion, forecasts); err != nil {
 		slog.Error("writing legacy result.json failed", "err", err)
@@ -85,68 +94,61 @@ func main() {
 	slog.Info("prediction run complete")
 }
 
-type stationState struct {
-	info      store.Station
-	model     *forest.Forest
-	neighbors []string
-	occ       map[int64]float64 // grows with each predicted step
-	mean7d    map[int64]float64 // precomputed once; see package doc for why that's safe
-	failed    bool
-}
-
-type rollout struct {
-	stations map[string]*stationState
-	holidays map[string]store.DayInfo
-	weather  map[string]int
-	cutoff   time.Time
-}
-
-func newRollout(
+// predictStation evaluates s's forest directly at every step of the
+// horizon, all anchored on the same cutoff. A nil model or unloadable
+// history yields an all-null forecast (station not yet forecastable), same
+// as a station whose data hasn't caught up to cutoff.
+func predictStation(
 	db *store.DB,
-	stations []store.Station,
-	neighborsByStation map[string][]string,
+	s store.Station,
+	model *forest.Forest,
 	holidayMap map[string]store.DayInfo,
 	weatherMap map[string]int,
-	from, cutoff, to time.Time,
+	from, cutoff time.Time,
+	horizonSteps int,
 	cfg config.Env,
-) *rollout {
-	r := &rollout{
-		stations: map[string]*stationState{},
-		holidays: holidayMap,
-		weather:  weatherMap,
-		cutoff:   cutoff,
+) publish.StationForecast {
+	fc := publish.StationForecast{Scode: s.Scode, Points: make([]publish.Point, 0, horizonSteps)}
+
+	nullForecast := func() publish.StationForecast {
+		for step := 1; step <= horizonSteps; step++ {
+			fc.Points = append(fc.Points, publish.Point{TS: cutoff.Add(time.Duration(step) * features.StepSeconds * time.Second)})
+		}
+		return fc
 	}
 
-	models, err := loadModels(db, stations)
+	if model == nil {
+		return nullForecast()
+	}
+
+	rawOcc, err := db.OccupancyMap(s.Scode, from, cutoff)
 	if err != nil {
-		slog.Error("loading models", "err", err)
+		slog.Error("loading occupancy history", "scode", s.Scode, "err", err)
+		return nullForecast()
 	}
+	occ := features.Normalize(rawOcc, s.Capacity)
+	mean7d := features.RollingMean7d(occ, cutoff, cutoff)
 
-	for _, s := range stations {
-		st := &stationState{info: s, neighbors: neighborsByStation[s.Scode]}
+	inputs := features.Inputs{Occupancy: occ, Mean7d: mean7d, Holidays: holidayMap, Weather: weatherMap}
 
-		model, ok := models[s.Scode]
+	for step := 1; step <= horizonSteps; step++ {
+		ts := cutoff.Add(time.Duration(step) * features.StepSeconds * time.Second)
+
+		row, ok := features.Build(ts, cutoff, inputs)
 		if !ok {
-			st.failed = true // no trained model yet: forecast stays all-null
-			r.stations[s.Scode] = st
+			fc.Points = append(fc.Points, publish.Point{TS: ts})
 			continue
 		}
-		st.model = model
 
-		rawOcc, err := db.OccupancyMap(s.Scode, from, cutoff)
-		if err != nil {
-			slog.Error("loading occupancy history", "scode", s.Scode, "err", err)
-			st.failed = true
-			r.stations[s.Scode] = st
-			continue
-		}
-		st.occ = features.Normalize(rawOcc, s.Capacity)
-		st.mean7d = features.RollingMean7d(st.occ, cutoff, to)
+		meanRatio, loRatio, hiRatio := model.PredictStats(row[:], cfg.ForestLoPercentile, cfg.ForestHiPercentile)
 
-		r.stations[s.Scode] = st
+		capacity := s.Capacity
+		lo := features.Denormalize(loRatio, capacity)
+		mean := features.Denormalize(meanRatio, capacity)
+		hi := features.Denormalize(hiRatio, capacity)
+		fc.Points = append(fc.Points, publish.Point{TS: ts, Lo: &lo, Mean: &mean, Hi: &hi})
 	}
-
-	return r
+	return fc
 }
 
 func loadModels(db *store.DB, stations []store.Station) (map[string]*forest.Forest, error) {
@@ -167,85 +169,4 @@ func loadModels(db *store.DB, stations []store.Station) (map[string]*forest.Fore
 		out[s.Scode] = f
 	}
 	return out, nil
-}
-
-// run steps through the forecast horizon one 5-minute tick at a time,
-// predicting every still-viable station at each tick before moving to the
-// next, so neighbor and lag features roll forward consistently.
-func (r *rollout) run(horizonSteps int, cfg config.Env) []publish.StationForecast {
-	forecasts := make(map[string]*publish.StationForecast, len(r.stations))
-	for scode := range r.stations {
-		forecasts[scode] = &publish.StationForecast{
-			Scode:  scode,
-			Points: make([]publish.Point, 0, horizonSteps),
-		}
-	}
-
-	// cutoff itself (step 0) carries no forecast point; step 1 is cutoff+5min.
-	cutoffUnix := r.cutoff.Unix()
-
-	for step := 1; step <= horizonSteps; step++ {
-		unix := cutoffUnix + int64(step)*features.StepSeconds
-		ts := time.Unix(unix, 0).UTC()
-
-		for scode, st := range r.stations {
-			fc := forecasts[scode]
-			if st.failed {
-				fc.Points = append(fc.Points, publish.Point{TS: ts})
-				continue
-			}
-
-			neighborVal, hasNeighbor := r.neighborMeanAt(st, unix-features.StepSeconds)
-			neighborInput := map[int64]float64{}
-			if hasNeighbor {
-				neighborInput[unix-features.StepSeconds] = neighborVal
-			}
-
-			row, ok := features.Build(ts, features.Inputs{
-				Occupancy: st.occ,
-				Neighbor:  neighborInput,
-				Mean7d:    st.mean7d,
-				Holidays:  r.holidays,
-				Weather:   r.weather,
-			})
-			if !ok {
-				st.failed = true
-				fc.Points = append(fc.Points, publish.Point{TS: ts})
-				continue
-			}
-
-			meanRatio, loRatio, hiRatio := st.model.PredictStats(row[:], cfg.ForestLoPercentile, cfg.ForestHiPercentile)
-			st.occ[unix] = meanRatio // feed the mean back in as the autoregressive "known" value for later steps
-
-			capacity := st.info.Capacity
-			lo := features.Denormalize(loRatio, capacity)
-			mean := features.Denormalize(meanRatio, capacity)
-			hi := features.Denormalize(hiRatio, capacity)
-			fc.Points = append(fc.Points, publish.Point{TS: ts, Lo: &lo, Mean: &mean, Hi: &hi})
-		}
-	}
-
-	out := make([]publish.StationForecast, 0, len(forecasts))
-	for _, fc := range forecasts {
-		out = append(out, *fc)
-	}
-	return out
-}
-
-func (r *rollout) neighborMeanAt(st *stationState, unix int64) (float64, bool) {
-	sum, count := 0.0, 0
-	for _, nc := range st.neighbors {
-		neighbor, ok := r.stations[nc]
-		if !ok || neighbor.occ == nil {
-			continue
-		}
-		if v, ok := neighbor.occ[unix]; ok {
-			sum += v
-			count++
-		}
-	}
-	if count == 0 {
-		return 0, false
-	}
-	return sum / float64(count), true
 }

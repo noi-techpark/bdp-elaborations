@@ -2,10 +2,9 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Command ingest refreshes the local SQLite cache: station/neighbor
-// metadata, holiday and weather reference data, and — incrementally, in
-// batches of stationBatchSize stations per request — occupancy history. It
-// replaces
+// Command ingest refreshes the local SQLite cache: station metadata, holiday
+// and weather reference data, and — incrementally, in batches of
+// stationBatchSize stations per request — occupancy history. It replaces
 // data-raw-get.js/data-raw-get-diff.js/data-holidays-get.*/data-meteo-get.sh.
 // Scheduled frequently (e.g. every 15 minutes) as its own k8s CronJob.
 package main
@@ -23,7 +22,6 @@ import (
 
 	"parking-forecast/internal/config"
 	"parking-forecast/internal/holidays"
-	"parking-forecast/internal/neighbors"
 	"parking-forecast/internal/odh"
 	"parking-forecast/internal/store"
 	"parking-forecast/internal/weather"
@@ -84,9 +82,6 @@ func main() {
 		})
 	}
 	ms.FailOnError(ctx, db.UpsertStations(storeStations), "upserting stations")
-
-	slog.Info("recomputing neighbor cache", "k", cfg.NeighborK)
-	ms.FailOnError(ctx, db.ReplaceNeighbors(neighbors.Compute(storeStations, cfg.NeighborK)), "replacing neighbors")
 
 	slog.Info("refreshing holidays cache")
 	if err := holidays.FetchAndCache(cfg.TourismApiBaseUrl, db); err != nil {
