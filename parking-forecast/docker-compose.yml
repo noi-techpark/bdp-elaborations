@@ -2,21 +2,25 @@
 #
 # SPDX-License-Identifier: CC0-1.0
 #
-# Each job runs on its own cron schedule via supercronic. Set *_CRON_SCHEDULE
-# in the environment (or .env) to override the defaults below.
+# One container runs the full pipeline once — ingest, then train, then
+# predict, in that order (see src/main.py, the image's default command) —
+# and exits. In production each job is instead its own Kubernetes CronJob
+# container on its own schedule (see infrastructure/helm); for local dev,
+# just re-run this whenever you want fresh data:
 #
-# ./data is bind-mounted at /app/data in every job container and holds the
-# SQLite cache (parking.db); ./data/result holds result.json, served by nginx.
-# Delete ./data/parking.db to reset the cache and start ingesting/training
-# from scratch.
+#   docker compose run --rm pipeline
 #
-# One-shot execution (useful for testing):
-#   docker compose run --rm ingest
-#   docker compose run --rm train
-#   docker compose run --rm predict
+# To run a single job instead of the full pipeline:
+#
+#   docker compose run --rm pipeline python /app/main.py ingest
+#
+# ./data is bind-mounted at /app/data and holds the SQLite cache
+# (parking.db) plus ./data/result/result.json, served by nginx. Delete
+# ./data/parking.db to reset the cache and start ingesting/training from
+# scratch.
 
 services:
-  ingest:
+  pipeline:
     build:
       context: .
       dockerfile: infrastructure/docker/Dockerfile
@@ -25,37 +29,7 @@ services:
     env_file:
       - .env
     environment:
-      CRON_SCHEDULE: ${INGEST_CRON_SCHEDULE:-*/15 * * * *}
-    command: ["/app/ingest"]
-    volumes:
-      - ./data:/app/data
-
-  train:
-    build:
-      context: .
-      dockerfile: infrastructure/docker/Dockerfile
-      target: build
-    image: parking-forecast
-    env_file:
-      - .env
-    environment:
-      CRON_SCHEDULE: ${TRAIN_CRON_SCHEDULE:-0 0 * * *}
-    command: ["/app/train"]
-    volumes:
-      - ./data:/app/data
-
-  predict:
-    build:
-      context: .
-      dockerfile: infrastructure/docker/Dockerfile
-      target: build
-    image: parking-forecast
-    env_file:
-      - .env
-    environment:
-      CRON_SCHEDULE: ${PREDICT_CRON_SCHEDULE:-0 3-23 * * *}
       RESULT_JSON_PATH: /app/data/result/result.json
-    command: ["/app/predict"]
     volumes:
       - ./data:/app/data
 

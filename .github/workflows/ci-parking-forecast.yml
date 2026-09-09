@@ -25,14 +25,11 @@ jobs:
       - name: REUSE Compliance Check
         uses: fsfe/reuse-action@v5
 
-      - name: Setup go
-        uses: actions/setup-go@v4
-        with:
-          go-version-file: ${{ env.WORKING_DIRECTORY }}/src/go.mod
-
-      - name: Run automated tests
-        run: go test ./...
-        working-directory: ${{ env.WORKING_DIRECTORY }}/src
+      - name: Run unit tests
+        working-directory: ${{ env.WORKING_DIRECTORY }}/infrastructure
+        run: |
+          docker compose -f docker-compose.test.yml build
+          docker compose -f docker-compose.test.yml run --rm test
 
       - name: Lint Helm chart
         run: helm lint ${{ env.WORKING_DIRECTORY }}/infrastructure/helm
@@ -65,7 +62,9 @@ jobs:
   deploy-test:
     runs-on: ubuntu-24.04
     needs: build
-    if: github.ref == 'refs/heads/main'
+    # TODO: drop the feat/parking-prediction-2 branch once merged to main —
+    # this lets the Python rewrite deploy to test before merge.
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feat/parking-prediction-2'
     concurrency: deploy-test-parking-forecast
     environment: test
     env:

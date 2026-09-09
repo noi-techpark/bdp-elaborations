@@ -2,37 +2,28 @@
 #
 # SPDX-License-Identifier: CC0-1.0
 
-FROM golang:1.25-bookworm AS base
+FROM python:3.14-slim AS base
 
-FROM base AS build-env
 WORKDIR /app
-COPY src/. .
-RUN go mod download
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/ingest ./cmd/ingest
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/train ./cmd/train
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/predict ./cmd/predict
+COPY src/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # ── Test stage ───────────────────────────────────────────────────────────────
-FROM build-env AS test
-CMD ["go", "test", "./..."]
+FROM base AS test
+COPY src/. .
+ENV PYTHONPATH=/app
+CMD ["python", "-m", "pytest", "tests/", "-v"]
 
 # ── Production stage ─────────────────────────────────────────────────────────
-FROM alpine:latest AS build
+FROM base AS build
 
-# supercronic drives the local-dev cron schedule (see entrypoint.sh); in
-# production, scheduling is a Kubernetes CronJob per binary and CRON_SCHEDULE
-# is left unset, so entrypoint.sh just runs the given command once.
-ARG SUPERCRONIC_VERSION=0.2.29
-ARG TARGETARCH=amd64
-RUN apk add --no-cache curl \
-    && curl -fsSL -o /usr/local/bin/supercronic \
-        "https://github.com/aptible/supercronic/releases/download/v${SUPERCRONIC_VERSION}/supercronic-linux-${TARGETARCH}" \
-    && chmod +x /usr/local/bin/supercronic \
-    && apk del curl
+COPY src/. .
+ENV PYTHONPATH=/app
 
-WORKDIR /app
-COPY --from=build-env /out/ingest /out/train /out/predict ./
-COPY infrastructure/docker/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
-
-ENTRYPOINT ["/app/entrypoint.sh"]
+# main.py is the single entry point for every job (see main.py's own
+# docstring). The default CMD runs the full local-dev pipeline; in
+# production each job's k8s CronJob container instead sets its own command
+# (see infrastructure/helm), e.g. ["python", "/app/main.py", "train"],
+# which replaces this ENTRYPOINT+CMD pair entirely.
+ENTRYPOINT ["python", "/app/main.py"]
+CMD ["pipeline"]

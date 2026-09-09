@@ -26,26 +26,17 @@ spec:
         spec:
           restartPolicy: OnFailure
           volumes:
-            - name: cache
+            - name: data
               persistentVolumeClaim:
-                claimName: {{ $.Release.Name }}-cache
-            {{- if eq $jobName "predict" }}
-            - name: result
-              persistentVolumeClaim:
-                claimName: {{ $.Release.Name }}-result
-            {{- end }}
+                claimName: {{ $.Release.Name }}-data
           containers:
             - name: {{ $jobName }}
               image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
               imagePullPolicy: {{ $.Values.image.pullPolicy }}
               command: {{ $job.command | toJson }}
               volumeMounts:
-                - name: cache
-                  mountPath: {{ $.Values.cache.mountPath }}
-                {{- if eq $jobName "predict" }}
-                - name: result
-                  mountPath: {{ $.Values.result.mountPath }}
-                {{- end }}
+                - name: data
+                  mountPath: {{ $.Values.data.mountPath }}
               env:
                 {{- range $key, $value := $.Values.env }}
                 - name: {{ $key }}

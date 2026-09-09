@@ -7,10 +7,15 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
-# SQLite cache — occupancy/holiday/weather history, station metadata
-# and fitted per-station forests. Shared by all three jobs (ingest writes
-# occupancy/reference data, train writes models, predict reads all of it).
-# Delete the file to force a full rebuild from scratch:
+# Single volume for everything: the SQLite cache (occupancy/holiday/weather
+# history, station metadata, fitted per-station forests) and result.json
+# (written by predict under <mountPath>/result/, served from there by the
+# nginx Deployment below via a subPath mount — same layout docker-compose.yml
+# uses locally). Shared by all three jobs (ingest writes occupancy/reference
+# data, train writes models, predict reads all of it and writes result.json).
+# Needs a ReadWriteMany-capable StorageClass since job pods and the
+# long-running nginx pod mount it concurrently.
+# Delete the DB file to force a full rebuild from scratch:
 #   kubectl exec -it <any ingest/train/predict pod> -- rm /app/data/parking.db
 #
 # ingest purges occupancy history past OCCUPANCY_RETENTION_DAYS (400 by
@@ -19,19 +24,10 @@ image:
 # ~1.7Gi for 300 stations at the 400-day default — size this for your actual
 # station count and bump it (PVC expansion, if the StorageClass allows it) if
 # you grow past what it was sized for.
-cache:
-  storage: 5Gi
+data:
+  storage: 10Gi
   mountPath: /app/data
-  # storageClassName: ""  # uncomment to override the cluster default
-
-# result.json — the legacy consumer format (readme-for-data-consumers.md),
-# written by predict and served by the nginx Deployment below. Needs a
-# ReadWriteMany-capable StorageClass since predict (a Job pod) and nginx (a
-# long-running Deployment pod) mount it concurrently.
-result:
-  storage: 100Mi
-  mountPath: /app/result
-  # storageClassName: ""
+  storageClassName: "gp3"
 
 # Sensitive env vars — rendered into a K8s Secret and injected per-container.
 # Set in test.yaml / prod.yaml (or injected by CI via yq).
@@ -58,9 +54,9 @@ env:
   TOURISM_API_BASE_URL: "https://tourism.api.opendatahub.com/v1"
 
   DB_PATH: "/app/data/parking.db"
-  RESULT_JSON_PATH: "/app/result/result.json"
+  RESULT_JSON_PATH: "/app/data/result/result.json"
   # Keeps the cache (and nightly training cost) bounded forever instead of
-  # growing with every station-year ingested — see internal/config.
+  # growing with every station-year ingested — see src/util/settings.py.
   OCCUPANCY_RETENTION_DAYS: "400"
 
   FOREST_TREES: "60"
@@ -68,6 +64,8 @@ env:
   FOREST_MIN_LEAF_SAMPLES: "20"
   FOREST_ROW_SUBSAMPLE: "0.8"
   FOREST_FEATURE_SUBSAMPLE: "0.7"
+  FOREST_LO_PERCENTILE: "0.1"
+  FOREST_HI_PERCENTILE: "0.9"
   MIN_TRAIN_ROWS: "500"
   MODEL_VERSION: "2.0"
   HOURS_TO_PREDICT: "48"

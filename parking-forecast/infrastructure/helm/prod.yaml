@@ -18,7 +18,7 @@ env:
 jobs:
   ingest:
     schedule: "*/15 * * * *"
-    command: ["/app/ingest"]
+    command: ["python", "/app/main.py", "ingest"]
     resources:
       requests:
         cpu: "100m"
@@ -28,7 +28,7 @@ jobs:
 
   train:
     schedule: "0 1 * * *"
-    command: ["/app/train"]
+    command: ["python", "/app/main.py", "train"]
     resources:
       requests:
         cpu: "1000m"
@@ -38,7 +38,7 @@ jobs:
 
   predict:
     schedule: "3 4-23 * * *"
-    command: ["/app/predict"]
+    command: ["python", "/app/main.py", "predict"]
     resources:
       requests:
         cpu: "500m"

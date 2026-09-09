@@ -2,11 +2,14 @@
 #
 # SPDX-License-Identifier: CC0-1.0
 #
-# Serves result.json (see templates/pvc.yaml's "result" claim, written by the
-# predict CronJob) for legacy STA-facing consumers. This chart intentionally
-# stops at a ClusterIP Service — routing an external hostname to it (Ingress,
-# DNS cutover from the old VM's nginx) is cluster/environment specific and is
-# left for whoever deploys this chart to wire up.
+# Serves result.json (see templates/pvc.yaml's shared "data" claim, written
+# by the predict CronJob under <mountPath>/result/) for legacy STA-facing
+# consumers — mounted here with subPath "result" so this container only ever
+# sees that subdirectory, not the SQLite cache living alongside it. This
+# chart intentionally stops at a ClusterIP Service — routing an external
+# hostname to it (Ingress, DNS cutover from the old VM's nginx) is
+# cluster/environment specific and is left for whoever deploys this chart to
+# wire up.
 
 apiVersion: apps/v1
 kind: Deployment
@@ -28,17 +31,18 @@ spec:
         app.kubernetes.io/component: nginx
     spec:
       volumes:
-        - name: result
+        - name: data
           persistentVolumeClaim:
-            claimName: {{ .Release.Name }}-result
+            claimName: {{ .Release.Name }}-data
       containers:
         - name: nginx
           image: nginx:latest
           ports:
             - containerPort: 80
           volumeMounts:
-            - name: result
+            - name: data
               mountPath: /usr/share/nginx/html
+              subPath: result
               readOnly: true
 ---
 apiVersion: v1
